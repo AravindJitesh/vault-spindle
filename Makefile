@@ -1,10 +1,12 @@
 .PHONY: up down test test-integration test-kill9 test-all exercise build
 
+COMPOSE := $(shell { docker compose version >/dev/null 2>&1 && echo "docker compose"; } || { command -v docker-compose >/dev/null 2>&1 && echo "docker-compose"; })
+
 up:
-	docker compose up --build -d
+	$(COMPOSE) up --build -d
 
 down:
-	docker compose down
+	$(COMPOSE) down
 
 build:
 	go build -o bin/server ./cmd/server
@@ -13,7 +15,7 @@ test:
 	go test ./internal/... -v -count=1
 
 test-integration:
-	docker compose up -d db
+	$(COMPOSE) up -d db
 	@echo "Waiting for Postgres..."
 	@sleep 3
 	DATABASE_URL=postgres://vault:vault@localhost:5432/vault?sslmode=disable go test ./tests/ -v -count=1
