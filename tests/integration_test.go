@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/aravind/vault-spindle/internal/api"
+	"github.com/aravind/vault-spindle/internal/migrate"
 	"github.com/aravind/vault-spindle/internal/models"
 	"github.com/aravind/vault-spindle/internal/store"
 )
@@ -41,12 +42,7 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	sqlBytes, err := os.ReadFile("../migrations/001_init.sql")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read migrations: %v\n", err)
-		os.Exit(1)
-	}
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+	if err := migrate.Apply(ctx, pool, "../migrations"); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate: %v\n", err)
 		os.Exit(1)
 	}
@@ -61,6 +57,7 @@ func resetPlayer(t *testing.T, playerID string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, q := range []string{
+		`DELETE FROM purchase_outbox WHERE player_id = $1`,
 		`DELETE FROM ledger_entries WHERE player_id = $1`,
 		`DELETE FROM idempotency_records WHERE player_id = $1`,
 		`DELETE FROM inventory WHERE player_id = $1`,
@@ -151,7 +148,7 @@ func TestConcurrentPurchasesOnlyOneSucceeds(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			status, _ := postJSON(t, ts.URL+"/v1/wallets/"+player+"/purchase", fmt.Sprintf("purchase-%d", i), map[string]any{
-				"itemId": "sword",
+				"itemId": "axe",
 				"price":  100,
 			})
 			switch status {
@@ -172,6 +169,7 @@ func TestConcurrentPurchasesOnlyOneSucceeds(t *testing.T) {
 	w := getWallet(t, ts.URL, player)
 	assert.Equal(t, int64(0), w.Balance)
 	assert.Len(t, w.Inventory, 1)
+	assert.Equal(t, "axe", w.Inventory[0])
 }
 
 func TestDuplicatePurchaseSameResponse(t *testing.T) {
@@ -392,4 +390,72 @@ func TestInsufficientFundsNoPartialEffect(t *testing.T) {
 		"price":  50,
 	})
 	assert.Equal(t, http.StatusConflict, status2)
+}
+
+func TestCatalogPriceMismatchRejected(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	player := "catalog-player"
+	resetPlayer(t, player)
+
+	postJSON(t, ts.URL+"/v1/wallets/"+player+"/credit", "catalog-fund", map[string]any{
+		"amount": 500, "reason": "seed",
+	})
+
+	status, body := postJSON(t, ts.URL+"/v1/wallets/"+player+"/purchase", "bad-price", map[string]any{
+		"itemId": "sword",
+		"price":  1,
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, string(body), "catalog price")
+
+	w := getWallet(t, ts.URL, player)
+	assert.Equal(t, int64(500), w.Balance)
+	assert.Empty(t, w.Inventory)
+}
+
+func TestLedgerReconcilesWithBalance(t *testing.T) {
+	ctx := context.Background()
+	st := store.New(testPool)
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	player := "reconcile-player"
+	resetPlayer(t, player)
+
+	postJSON(t, ts.URL+"/v1/wallets/"+player+"/credit", "rec-credit", map[string]any{
+		"amount": 300, "reason": "battle",
+	})
+	postJSON(t, ts.URL+"/v1/wallets/"+player+"/purchase", "rec-buy", map[string]any{
+		"itemId": "shield",
+		"price":  200,
+	})
+
+	walletBalance, ledgerSum, err := st.ReconcilePlayer(ctx, player)
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), walletBalance)
+	assert.Equal(t, int64(100), ledgerSum)
+}
+
+func TestPurchaseOutboxFulfilled(t *testing.T) {
+	ctx := context.Background()
+	st := store.New(testPool)
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	player := "outbox-player"
+	resetPlayer(t, player)
+
+	postJSON(t, ts.URL+"/v1/wallets/"+player+"/credit", "outbox-fund", map[string]any{
+		"amount": 100, "reason": "seed",
+	})
+	postJSON(t, ts.URL+"/v1/wallets/"+player+"/purchase", "outbox-buy", map[string]any{
+		"itemId": "axe",
+		"price":  100,
+	})
+
+	status, err := st.OutboxStatus(ctx, "outbox-buy")
+	require.NoError(t, err)
+	assert.Equal(t, "fulfilled", status)
 }

@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	ErrInsufficientFunds = errors.New("insufficient funds")
-	ErrNotFound          = errors.New("not found")
+	ErrInsufficientFunds           = errors.New("insufficient funds")
+	ErrNotFound                    = errors.New("not found")
+	ErrIdempotencyPlayerMismatch   = errors.New("idempotency key belongs to another player")
 )
 
 type Store struct {
@@ -49,21 +50,25 @@ func (s *Store) ensureWallet(ctx context.Context, tx pgx.Tx, playerID string) er
 	return err
 }
 
-// checkIdempotency returns cached response if key exists; nil if new.
-func (s *Store) checkIdempotency(ctx context.Context, tx pgx.Tx, key string) (*IdempotencyHit, error) {
+// checkIdempotency returns cached response if key exists for the same player; nil if new.
+func (s *Store) checkIdempotency(ctx context.Context, tx pgx.Tx, key, playerID string) (*IdempotencyHit, error) {
 	var status int
 	var body []byte
+	var recordPlayer string
 	err := tx.QueryRow(ctx, `
-		SELECT http_status, response_body
+		SELECT http_status, response_body, player_id
 		FROM idempotency_records
 		WHERE idempotency_key = $1
 		FOR UPDATE
-	`, key).Scan(&status, &body)
+	`, key).Scan(&status, &body, &recordPlayer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if recordPlayer != playerID {
+		return nil, fmt.Errorf("%w", ErrIdempotencyPlayerMismatch)
 	}
 	if status == 0 {
 		return nil, fmt.Errorf("idempotency record in progress")
@@ -104,7 +109,7 @@ func (s *Store) Credit(ctx context.Context, playerID, idempotencyKey, reason str
 	}
 	defer tx.Rollback(ctx)
 
-	if hit, err := s.checkIdempotency(ctx, tx, idempotencyKey); err != nil {
+	if hit, err := s.checkIdempotency(ctx, tx, idempotencyKey, playerID); err != nil {
 		return nil, nil, err
 	} else if hit != nil {
 		if err := tx.Commit(ctx); err != nil {
@@ -160,7 +165,7 @@ func (s *Store) creditAfterConflict(ctx context.Context, playerID, idempotencyKe
 	}
 	defer tx.Rollback(ctx)
 
-	hit, err := s.checkIdempotency(ctx, tx, idempotencyKey)
+	hit, err := s.checkIdempotency(ctx, tx, idempotencyKey, playerID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -186,7 +191,7 @@ func (s *Store) Purchase(ctx context.Context, playerID, idempotencyKey, itemID s
 	}
 	defer tx.Rollback(ctx)
 
-	if hit, err := s.checkIdempotency(ctx, tx, idempotencyKey); err != nil {
+	if hit, err := s.checkIdempotency(ctx, tx, idempotencyKey, playerID); err != nil {
 		return nil, nil, err
 	} else if hit != nil {
 		if err := tx.Commit(ctx); err != nil {
@@ -240,8 +245,29 @@ func (s *Store) Purchase(ctx context.Context, playerID, idempotencyKey, itemID s
 	}
 
 	_, err = tx.Exec(ctx, `
+		INSERT INTO purchase_outbox (purchase_id, player_id, item_id, price, status)
+		VALUES ($1, $2, $3, $4, 'pending')
+	`, idempotencyKey, playerID, itemID, price)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if delay := purchaseTestDelay(); delay > 0 {
+		time.Sleep(delay)
+	}
+
+	_, err = tx.Exec(ctx, `
 		INSERT INTO inventory (player_id, item_id) VALUES ($1, $2)
 	`, playerID, itemID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE purchase_outbox
+		SET status = 'fulfilled', fulfilled_at = NOW()
+		WHERE purchase_id = $1
+	`, idempotencyKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -281,7 +307,7 @@ func (s *Store) purchaseAfterConflict(ctx context.Context, playerID, idempotency
 	}
 	defer tx.Rollback(ctx)
 
-	hit, err := s.checkIdempotency(ctx, tx, idempotencyKey)
+	hit, err := s.checkIdempotency(ctx, tx, idempotencyKey, playerID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -308,7 +334,7 @@ func (s *Store) ClaimReward(ctx context.Context, rewardID, playerID, idempotency
 	defer tx.Rollback(ctx)
 
 	if idempotencyKey != "" {
-		if hit, err := s.checkIdempotency(ctx, tx, idempotencyKey); err != nil {
+		if hit, err := s.checkIdempotency(ctx, tx, idempotencyKey, playerID); err != nil {
 			return nil, nil, err
 		} else if hit != nil {
 			if err := tx.Commit(ctx); err != nil {
@@ -374,7 +400,7 @@ func (s *Store) claimAfterConflict(ctx context.Context, rewardID, playerID, idem
 	}
 	defer tx.Rollback(ctx)
 
-	hit, err := s.checkIdempotency(ctx, tx, idempotencyKey)
+	hit, err := s.checkIdempotency(ctx, tx, idempotencyKey, playerID)
 	if err != nil {
 		return nil, nil, err
 	}

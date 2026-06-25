@@ -1,5 +1,14 @@
 # Resilience — Split Inventory Service & Audit
 
+## Implemented in this repo
+
+The **`purchase_outbox`** table and **`ReconcilePlayer`** function are implemented today:
+
+- **Monolithic mode:** debit, outbox insert (`pending`), inventory grant, outbox mark `fulfilled` — all in **one Postgres transaction**. This matches the pre-split baseline and proves the outbox row is crash-safe alongside the debit.
+- **Future split mode:** stop at outbox `pending` on commit; a relay worker calls inventory with `Idempotency-Key: purchase_id` (design above). The table and status transitions are already in place.
+- **Reconciliation:** `store.ReconcilePlayer` enforces `wallet.balance == SUM(ledger.amount)`; integration tests call it after credit + purchase.
+- **Double-credit detection:** unique index `idx_ledger_credit_idempotency` on credit ledger metadata.
+
 ## Problem: purchase spans two services
 
 Today, debit and item grant live in one Postgres transaction. In production, **inventory moves to a separate service** over HTTP that can timeout, fail, or duplicate requests, and **cannot share a transaction** with the currency store.

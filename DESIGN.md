@@ -1,4 +1,4 @@
-# vault-spindle ó Design
+# vault-spindle ù Design
 
 ## Overview
 
@@ -19,8 +19,8 @@ Client ??HTTP??? Go API (stdlib net/http)
 | Requirement | How Postgres satisfies it |
 |---|---|
 | Durability across `kill -9` | WAL fsync; committed rows survive process death |
-| Atomic debit + item grant | Single `BEGINÖCOMMIT` transaction |
-| Concurrent wallet updates | `SELECT Ö FOR UPDATE` row lock serializes writers |
+| Atomic debit + item grant | Single `BEGINùCOMMIT` transaction |
+| Concurrent wallet updates | `SELECT ù FOR UPDATE` row lock serializes writers |
 | Claim-once | `PRIMARY KEY (reward_id, player_id)` |
 | Idempotent retries | `idempotency_records` table with stored HTTP responses |
 
@@ -30,13 +30,14 @@ Redis alone cannot atomically tie balance mutation to inventory insert without a
 
 ## Schema
 
-- **`wallets`** ó `player_id` PK, `balance BIGINT CHECK (balance >= 0)`
-- **`inventory`** ó one row per granted item (ordered by `granted_at`)
-- **`reward_claims`** ó composite PK `(reward_id, player_id)` for claim-once
-- **`idempotency_records`** ó dedupe key ? serialized HTTP response
-- **`ledger_entries`** ó append-only audit log (credits, debits, claims)
+- **`wallets`** ù `player_id` PK, `balance BIGINT CHECK (balance >= 0)`
+- **`inventory`** ù one row per granted item (ordered by `granted_at`)
+- **`reward_claims`** ù composite PK `(reward_id, player_id)` for claim-once
+- **`idempotency_records`** ù dedupe key ? serialized HTTP response
+- **`ledger_entries`** ù append-only audit log (credits, debits, claims)
+- **`purchase_outbox`** ù durable purchase fulfillment intent (`pending` ? `fulfilled` in same txn today)
 
-Migrations run from `migrations/001_init.sql` on startup.
+Migrations run from `migrations/*.sql` on startup (lexical order).
 
 ## Exactly-once / deduplication strategy
 
@@ -44,16 +45,18 @@ Migrations run from `migrations/001_init.sql` on startup.
 
 All mutating wallet endpoints require `Idempotency-Key: <client-generated string>` (max 256 chars). Flow inside a **single database transaction**:
 
-1. `SELECT Ö FROM idempotency_records WHERE key = $1 FOR UPDATE`
+1. `SELECT ù FROM idempotency_records WHERE key = $1 FOR UPDATE`
    - If row exists with `http_status != 0` ? return cached JSON body and status (byte-identical retry).
-2. `INSERT INTO idempotency_records (key, http_status=0)` ó marks in-flight inside this txn.
+2. `INSERT INTO idempotency_records (key, http_status=0)` ù marks in-flight inside this txn.
 3. Perform business logic (credit / purchase with wallet row locked).
 4. `UPDATE idempotency_records SET http_status, response_body`.
 5. `COMMIT`.
 
-If the process dies at any point before `COMMIT`, Postgres rolls back **everything** including the in-flight idempotency row. A retry starts fresh ó no stuck ìprocessingî state.
+If the process dies at any point before `COMMIT`, Postgres rolls back **everything** including the in-flight idempotency row. A retry starts fresh ù no stuck ùprocessingù state.
 
 Concurrent duplicate requests with the same key: the second `INSERT` hits `23505 unique violation`, opens a new txn, reads the completed record, returns cached response.
+
+Idempotency keys are **global** but bound to the `player_id` stored at first use. Reusing a key for a different player returns an error (prevents cross-player response replay).
 
 ### Reward claim
 
@@ -65,7 +68,7 @@ Natural idempotency via `UNIQUE(reward_id, player_id)`:
 
 ### Key retention
 
-Background goroutine purges `idempotency_records` older than **7 days**. After purge, a retry with the same key would execute again ó clients must use fresh keys for new operations. Documented limit; production would align retention with client retry windows (typically 24ñ72h).
+Background goroutine purges `idempotency_records` older than **7 days**. After purge, a retry with the same key would execute again ù clients must use fresh keys for new operations. Documented limit; production would align retention with client retry windows (typically 24ù72h).
 
 ## Atomicity & crash behavior
 
@@ -81,11 +84,15 @@ One transaction:
 2. `SELECT balance FROM wallets WHERE player_id = $1 FOR UPDATE`
 3. If `balance < price` ? write 409 response to idempotency table, commit (cached rejection on retry)
 4. `UPDATE wallets SET balance = balance - price`
-5. `INSERT INTO inventory Ö`
-6. Ledger entry
-7. Finalize idempotency ? commit
+5. `INSERT INTO purchase_outbox Ö status=pending` (durable intent before grant)
+6. `INSERT INTO inventory Ö`
+7. `UPDATE purchase_outbox SET status=fulfilled`
+8. Ledger entry
+9. Finalize idempotency ? commit
 
-**Mid-purchase `kill -9`:** If killed before commit, wallet balance and inventory are unchanged. Retry with same idempotency key succeeds once. Never ìdebited but no itemî or ìitem but no debitî.
+Optional `TEST_PURCHASE_DELAY_MS` sleeps between steps 5ñ6 inside the transaction for `scripts/test-kill9.sh`.
+
+**Mid-purchase `kill -9`:** If killed before commit, wallet balance and inventory are unchanged. Retry with same idempotency key succeeds once. Never "debited but no item" or "item but no debit".
 
 ### Concurrency
 
@@ -102,14 +109,20 @@ Two purchases racing on a wallet that can afford only one:
 
 | Endpoint | Success | Error bodies |
 |---|---|---|
-| `POST Ö/credit` | **200** `{balance, reason}` | **400** `{error, message}` |
-| `POST Ö/purchase` | **200** `{balance, itemId, inventory}` | **409** `{error:"insufficient_funds", message}` |
-| `POST Ö/rewards/{id}/claim` | **200** `{rewardId, playerId, alreadyClaimed}` | **400** invalid input |
-| `GET Ö/wallets/{id}` | **200** `{balance, inventory, claimedRewards}` | **400** invalid id |
+| `POST ù/credit` | **200** `{balance, reason}` | **400** `{error, message}` |
+| `POST ù/purchase` | **200** `{balance, itemId, inventory}` | **409** `{error:"insufficient_funds", message}` |
+| `POST ù/rewards/{id}/claim` | **200** `{rewardId, playerId, alreadyClaimed}` | **400** invalid input |
+| `GET ù/wallets/{id}` | **200** `{balance, inventory, claimedRewards}` | **400** invalid id |
 
 All mutating endpoints require `Content-Type: application/json`. Credit/purchase require `Idempotency-Key`.
 
-**Authoritative pricing:** The server debits the `price` from the request body. In production I would look up catalog prices server-side; for this slice the spec sends `price` in the body and the server enforces solvency against the stored balance, rejecting underfunded purchases atomically.
+**Authoritative pricing:** Prices are defined in `internal/catalog/catalog.go`. The purchase body still includes `price` (mandated by the assessment contract), but the server rejects any value that does not match the catalog. Clients cannot underpay or invent items.
+
+## Audit & reconciliation
+
+- Every credit and purchase writes a **`ledger_entries`** row with idempotency metadata.
+- **`idx_ledger_credit_idempotency`** unique index rejects duplicate credits sharing the same idempotency key.
+- **`ReconcilePlayer`** compares `wallets.balance` to `SUM(ledger_entries.amount)` ù used in tests and described in `RESILIENCE.md` for production drift detection.
 
 ## Input validation
 
@@ -127,3 +140,4 @@ Malformed input never reaches SQL with unchecked values.
 - Health: `GET /health` checks DB connectivity
 - Docker Compose brings up Postgres 16 + API
 - Graceful shutdown on SIGTERM (10s drain); `kill -9` relies on Postgres durability, not in-process state
+- **`scripts/test-kill9.sh`** ù SIGKILL API mid-purchase, restart, retry with same idempotency key

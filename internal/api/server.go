@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aravind/vault-spindle/internal/catalog"
 	"github.com/aravind/vault-spindle/internal/models"
 	"github.com/aravind/vault-spindle/internal/store"
 )
@@ -142,7 +143,13 @@ func (s *Server) handlePurchase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, hit, err := s.store.Purchase(r.Context(), playerID, idempotencyKey, req.ItemID, req.Price)
+	price, err := catalog.AuthoritativePrice(req.ItemID, req.Price)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid_request", Message: err.Error()})
+		return
+	}
+
+	result, hit, err := s.store.Purchase(r.Context(), playerID, idempotencyKey, req.ItemID, price)
 	if err != nil {
 		s.logger.Error("purchase failed", "err", err)
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "internal_error", Message: "purchase failed"})
@@ -234,9 +241,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
+			Error:   "internal_error",
+			Message: "failed to encode response",
+		})
+		return
+	}
+	writeRawJSON(w, status, b)
 }
 
 func writeRawJSON(w http.ResponseWriter, status int, body []byte) {

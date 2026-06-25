@@ -22,6 +22,7 @@ services:
     environment:
       DATABASE_URL: postgres://vault:vault@db:5432/vault?sslmode=disable
       LISTEN_ADDR: ":8080"
+      TEST_PURCHASE_DELAY_MS: ${TEST_PURCHASE_DELAY_MS:-}
     depends_on:
       db:
         condition: service_healthy

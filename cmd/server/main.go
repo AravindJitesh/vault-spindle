@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aravind/vault-spindle/internal/api"
+	"github.com/aravind/vault-spindle/internal/migrate"
 	"github.com/aravind/vault-spindle/internal/store"
 )
 
@@ -68,12 +69,7 @@ func main() {
 }
 
 func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	sqlBytes, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		return err
-	}
-	_, err = pool.Exec(ctx, string(sqlBytes))
-	return err
+	return migrate.Apply(ctx, pool, "migrations")
 }
 
 func startIdempotencyPurge(st *store.Store, logger *slog.Logger) {
