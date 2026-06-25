@@ -93,8 +93,8 @@ func (s *Store) completeIdempotency(ctx context.Context, tx pgx.Tx, key string, 
 }
 
 type CreditResult struct {
-	Balance int64
-	Reason  string
+	Balance int64  `json:"balance"`
+	Reason  string `json:"reason"`
 }
 
 func (s *Store) Credit(ctx context.Context, playerID, idempotencyKey, reason string, amount int64) (*CreditResult, *IdempotencyHit, error) {
@@ -174,9 +174,9 @@ func (s *Store) creditAfterConflict(ctx context.Context, playerID, idempotencyKe
 }
 
 type PurchaseResult struct {
-	Balance   int64
-	ItemID    string
-	Inventory []string
+	Balance   int64    `json:"balance"`
+	ItemID    string   `json:"itemId"`
+	Inventory []string `json:"inventory"`
 }
 
 func (s *Store) Purchase(ctx context.Context, playerID, idempotencyKey, itemID string, price int64) (*PurchaseResult, *IdempotencyHit, error) {
@@ -295,9 +295,9 @@ func (s *Store) purchaseAfterConflict(ctx context.Context, playerID, idempotency
 }
 
 type ClaimResult struct {
-	RewardID       string
-	PlayerID       string
-	AlreadyClaimed bool
+	RewardID       string `json:"rewardId"`
+	PlayerID       string `json:"playerId"`
+	AlreadyClaimed bool   `json:"alreadyClaimed"`
 }
 
 func (s *Store) ClaimReward(ctx context.Context, rewardID, playerID, idempotencyKey string) (*ClaimResult, *IdempotencyHit, error) {

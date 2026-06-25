@@ -60,14 +60,16 @@ func TestMain(m *testing.M) {
 func resetPlayer(t *testing.T, playerID string) {
 	t.Helper()
 	ctx := context.Background()
-	_, err := testPool.Exec(ctx, `
-		DELETE FROM ledger_entries WHERE player_id = $1;
-		DELETE FROM idempotency_records WHERE player_id = $1;
-		DELETE FROM inventory WHERE player_id = $1;
-		DELETE FROM reward_claims WHERE player_id = $1;
-		DELETE FROM wallets WHERE player_id = $1;
-	`, playerID)
-	require.NoError(t, err)
+	for _, q := range []string{
+		`DELETE FROM ledger_entries WHERE player_id = $1`,
+		`DELETE FROM idempotency_records WHERE player_id = $1`,
+		`DELETE FROM inventory WHERE player_id = $1`,
+		`DELETE FROM reward_claims WHERE player_id = $1`,
+		`DELETE FROM wallets WHERE player_id = $1`,
+	} {
+		_, err := testPool.Exec(ctx, q, playerID)
+		require.NoError(t, err)
+	}
 }
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -268,7 +270,7 @@ func TestCrashRollbackNoPartialPurchase(t *testing.T) {
 	_, err = tx.Exec(ctx, `INSERT INTO inventory (player_id, item_id) VALUES ($1, 'axe')`, player)
 	require.NoError(t, err)
 
-	// Process killed ù transaction never committed.
+	// Process killed mid-transaction; rollback before commit.
 	require.NoError(t, tx.Rollback(ctx))
 
 	balance, inv, _, err := st.GetWallet(ctx, player)
